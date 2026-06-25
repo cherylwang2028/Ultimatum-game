@@ -90,6 +90,40 @@ async def sync_room(room):
     await broadcast(room, {"type": "sync", "data": snapshot(room)})
 
 
+def detach_ws(ws):
+    ws.room_code = None
+    ws.player_id = None
+
+
+async def leave_waiting_room(ws, room, player):
+    if room["state"] != "waiting":
+        return False
+    room["players"] = [p for p in room["players"] if p["id"] != player["id"]]
+    detach_ws(ws)
+    code = room["code"]
+    if not room["players"]:
+        rooms.pop(code, None)
+    else:
+        await sync_room(room)
+    await ws.send(json.dumps({"type": "left"}))
+    return True
+
+
+async def end_session(room):
+    clear_decision(room)
+    payoffs = dict(room.get("session_payoffs", {"p1": 0, "p2": 0}))
+    msg = json.dumps({"type": "game_ended", "sessionPayoffs": payoffs})
+    code = room["code"]
+    for p in room["players"]:
+        if p["ws"]:
+            detach_ws(p["ws"])
+            try:
+                await p["ws"].send(msg)
+            except Exception:
+                pass
+    rooms.pop(code, None)
+
+
 def clear_decision(room):
     task = room.get("decision_task")
     if task:
@@ -342,6 +376,12 @@ async def process(ws, msg):
             else:
                 room["round"] += 1
                 await start_round(room)
+
+        elif t == "leave_room" and room["state"] == "waiting":
+            await leave_waiting_room(ws, room, player)
+
+        elif t == "end_game" and room["state"] in ("running", "proposed", "result", "finished"):
+            await end_session(room)
 
 
 def check_admin_key(request):
